@@ -64,6 +64,8 @@ controls.minDistance = 4.5;
 controls.maxDistance = 105;
 controls.rotateSpeed = 0.42;
 controls.zoomSpeed = 0.75;
+controls.zoomToCursor = false;
+controls.screenSpacePanning = true;
 
 const galaxyGroup = new THREE.Group();
 const systemGroup = new THREE.Group();
@@ -82,6 +84,12 @@ let activeMode = 'galaxy';
 let navigationTween = null;
 let transitionLocked = false;
 let pointerDown = null;
+let focusedSystemObject = null;
+const focusedWorldPosition = new THREE.Vector3();
+const pressedKeys = new Set();
+const navigationRight = new THREE.Vector3();
+const navigationUp = new THREE.Vector3();
+const navigationDirection = new THREE.Vector3();
 
 const STAR_TYPES = [
   {
@@ -309,12 +317,29 @@ function pickObject(event, moveOnly = false) {
   const targets = activeMode === 'galaxy' ? clickableStars : systemClickables;
   const hits = raycaster.intersectObjects(targets, false);
   renderer.domElement.style.cursor = hits.length ? 'pointer' : 'grab';
-  if (!moveOnly && hits.length && activeMode === 'galaxy') {
-    selectStar(hits[0].object);
+  if (!moveOnly && hits.length) {
+    if (activeMode === 'galaxy') {
+      selectStar(hits[0].object);
+    } else {
+      centerSystemObject(hits[0].object);
+    }
   }
 }
 
+function centerSystemObject(object) {
+  const destination = object.getWorldPosition(new THREE.Vector3());
+  navigationTween = {
+    kind: 'target',
+    started: performance.now(),
+    duration: 620,
+    fromTarget: controls.target.clone(),
+    toTarget: destination,
+    focusObject: object,
+  };
+}
+
 function selectStar(sprite) {
+  focusedSystemObject = null;
   if (selectedStar) {
     selectedStar.label.userData.element.classList.remove('selected');
   }
@@ -372,11 +397,55 @@ function updateNavigation(now) {
   }
   if (raw >= 1) {
     const wasFlight = navigationTween.kind === 'flight';
+    if (navigationTween.focusObject) {
+      focusedSystemObject = navigationTween.focusObject;
+      focusedSystemObject.getWorldPosition(focusedWorldPosition);
+      controls.target.copy(focusedWorldPosition);
+    }
     navigationTween = null;
     if (wasFlight) {
       enterSystem();
     }
   }
+}
+
+function updateKeyboardNavigation(delta) {
+  const horizontal = Number(pressedKeys.has('KeyD') || pressedKeys.has('ArrowRight'))
+    - Number(pressedKeys.has('KeyA') || pressedKeys.has('ArrowLeft'));
+  const vertical = Number(pressedKeys.has('KeyW') || pressedKeys.has('ArrowUp'))
+    - Number(pressedKeys.has('KeyS') || pressedKeys.has('ArrowDown'));
+
+  if (horizontal === 0 && vertical === 0) {
+    return;
+  }
+
+  navigationTween = null;
+  focusedSystemObject = null;
+  camera.updateMatrixWorld();
+  navigationRight.set(1, 0, 0).applyQuaternion(camera.quaternion).normalize();
+  navigationUp.set(0, 1, 0).applyQuaternion(camera.quaternion).normalize();
+  navigationDirection
+    .set(0, 0, 0)
+    .addScaledVector(navigationRight, horizontal)
+    .addScaledVector(navigationUp, vertical)
+    .normalize();
+
+  const distanceToCenter = camera.position.distanceTo(controls.target);
+  const boost = pressedKeys.has('ShiftLeft') || pressedKeys.has('ShiftRight') ? 2.2 : 1;
+  const speed = THREE.MathUtils.clamp(distanceToCenter * 0.72, 1.4, 28) * boost;
+  const movement = navigationDirection.multiplyScalar(speed * delta);
+  camera.position.add(movement);
+  controls.target.add(movement);
+}
+
+function updateFocusedObject() {
+  if (!focusedSystemObject || activeMode !== 'system' || navigationTween) {
+    return;
+  }
+  const nextPosition = focusedSystemObject.getWorldPosition(new THREE.Vector3());
+  camera.position.add(nextPosition.clone().sub(focusedWorldPosition));
+  controls.target.copy(nextPosition);
+  focusedWorldPosition.copy(nextPosition);
 }
 
 function updateProximity() {
@@ -394,6 +463,7 @@ function updateProximity() {
 }
 
 function clearSystem() {
+  focusedSystemObject = null;
   orbitalBodies.length = 0;
   systemClickables.length = 0;
   while (systemGroup.children.length) {
@@ -573,6 +643,7 @@ function enterSystem() {
   setTimeout(() => {
     buildSystem(selectedStar);
     activeMode = 'system';
+    focusedSystemObject = null;
     galaxyGroup.visible = false;
     systemGroup.visible = true;
     app.classList.add('system-mode');
@@ -598,6 +669,7 @@ function leaveSystem() {
   ui.curtain.classList.add('visible');
   setTimeout(() => {
     activeMode = 'galaxy';
+    focusedSystemObject = null;
     systemGroup.visible = false;
     galaxyGroup.visible = true;
     app.classList.remove('system-mode');
@@ -639,6 +711,7 @@ function animate(now) {
   requestAnimationFrame(animate);
   const delta = Math.min(clock.getDelta(), 0.05);
   updateNavigation(now);
+  updateKeyboardNavigation(delta);
   controls.update();
   updateProximity();
   updateLabels();
@@ -648,6 +721,7 @@ function animate(now) {
     for (const body of orbitalBodies) {
       body.pivot.rotation.y += body.speed * delta;
     }
+    updateFocusedObject();
   } else {
     galaxyGroup.rotation.y += 0.000035;
   }
@@ -686,12 +760,36 @@ $('.brand').addEventListener('click', (event) => {
 });
 
 addEventListener('keydown', (event) => {
+  const navigationCodes = [
+    'KeyW',
+    'KeyA',
+    'KeyS',
+    'KeyD',
+    'ArrowUp',
+    'ArrowDown',
+    'ArrowLeft',
+    'ArrowRight',
+    'ShiftLeft',
+    'ShiftRight',
+  ];
+  if (navigationCodes.includes(event.code)) {
+    pressedKeys.add(event.code);
+    event.preventDefault();
+  }
   if (event.key === 'Enter') {
     startFlight();
   }
   if (event.key === 'Escape') {
     leaveSystem();
   }
+});
+
+addEventListener('keyup', (event) => {
+  pressedKeys.delete(event.code);
+});
+
+addEventListener('blur', () => {
+  pressedKeys.clear();
 });
 
 addEventListener('resize', () => {

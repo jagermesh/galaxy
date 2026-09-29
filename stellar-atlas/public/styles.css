@@ -268,7 +268,7 @@ button { font: inherit; }
   bottom: 23px;
   transform: translateX(-50%);
   display: flex;
-  gap: 28px;
+  gap: 22px;
   padding: 12px 20px;
   border-top: 1px solid var(--line);
   color: #586671;
@@ -280,6 +280,11 @@ button { font: inherit; }
 .controls-bar div { display: flex; align-items: center; gap: 7px; }
 .controls-bar b { color: #8997a1; font-weight: 400; }
 .mouse-icon { color: var(--cyan); font-size: 14px; }
+
+@media (max-width: 1120px) and (min-width: 761px) {
+  .controls-bar { gap: 13px; padding-inline: 12px; }
+  .controls-bar div > span:not(.mouse-icon) { display: none; }
+}
 
 .coordinates {
   position: absolute;
