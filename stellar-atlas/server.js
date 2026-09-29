@@ -25,6 +25,11 @@ app.get('*splat', (_request, response) => {
   response.sendFile(path.join(root, 'public', 'index.html'));
 });
 
-app.listen(port, () => {
-  console.log(`Stellar Atlas is running at http://localhost:${port}`);
+app.listen(port, "127.0.0.1", (error) => {
+  if (error) {
+    console.error("Unable to start Stellar Atlas:", error);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`Stellar Atlas is running at http://127.0.0.1:${port}`);
 });
