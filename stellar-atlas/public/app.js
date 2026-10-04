@@ -21,6 +21,7 @@ const ui = {
   proximityValue: $('#proximity-value'),
   proximityProgress: $('#proximity-progress'),
   fly: $('#fly-button'),
+  flyLabel: $('#fly-label'),
   back: $('#back-button'),
   mode: $('#mode-label'),
   coordinates: $('#coordinates'),
@@ -30,6 +31,23 @@ const ui = {
   planetCount: $('#planet-count'),
   moonCount: $('#moon-count'),
   curtain: $('#transition-curtain'),
+  fuel: $('#fuel-value'),
+  probes: $('#probe-value'),
+  data: $('#data-value'),
+  fragments: $('#fragment-value'),
+  missionText: $('#mission-text'),
+  scanPanel: $('#scan-panel'),
+  scanName: $('#scan-name'),
+  scanKind: $('#scan-kind'),
+  scanSignal: $('#scan-signal'),
+  scanResult: $('#scan-result'),
+  scanProgress: $('#scan-progress'),
+  scanButton: $('#scan-button'),
+  toast: $('#game-toast'),
+  complete: $('#mission-complete'),
+  completeSystems: $('#complete-systems'),
+  completeData: $('#complete-data'),
+  continueButton: $('#continue-button'),
 };
 
 const scene = new THREE.Scene();
@@ -75,9 +93,13 @@ scene.add(galaxyGroup, systemGroup);
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 const clock = new THREE.Clock();
+const SYSTEM_TIME_SCALE = 0.28;
+const STAR_FOCUS_DISTANCE = 18;
+const SAVE_KEY = 'stellar-atlas-expedition-v2';
 const galaxyStars = [];
 const clickableStars = [];
 const orbitalBodies = [];
+const spinningBodies = [];
 const systemClickables = [];
 let selectedStar = null;
 let activeMode = 'galaxy';
@@ -85,11 +107,84 @@ let navigationTween = null;
 let transitionLocked = false;
 let pointerDown = null;
 let focusedSystemObject = null;
+let activeScanTarget = null;
+let scanInProgress = false;
+let toastTimer = null;
 const focusedWorldPosition = new THREE.Vector3();
 const pressedKeys = new Set();
 const navigationRight = new THREE.Vector3();
 const navigationUp = new THREE.Vector3();
 const navigationDirection = new THREE.Vector3();
+
+const DEFAULT_GAME_STATE = {
+  fuel: 100,
+  probes: 6,
+  data: 0,
+  fragments: 0,
+  currentLocation: null,
+  scanned: [],
+  visitedSystems: [],
+  completed: false,
+};
+
+function loadGameState() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(SAVE_KEY));
+    return {
+      ...DEFAULT_GAME_STATE,
+      ...stored,
+      scanned: Array.isArray(stored?.scanned) ? stored.scanned : [],
+      visitedSystems: Array.isArray(stored?.visitedSystems) ? stored.visitedSystems : [],
+    };
+  } catch {
+    return { ...DEFAULT_GAME_STATE };
+  }
+}
+
+const gameState = loadGameState();
+
+function saveGameState() {
+  localStorage.setItem(SAVE_KEY, JSON.stringify(gameState));
+}
+
+function missionCopy() {
+  if (gameState.fragments >= 3) return 'Источник сигнала определён — исследование можно продолжить';
+  if (gameState.fragments === 2) return 'Найти последний фрагмент сигнала';
+  if (gameState.fragments === 1) return 'Найти ещё два фрагмента сигнала';
+  return 'Обнаружить первый фрагмент сигнала';
+}
+
+function updateGameUI() {
+  ui.fuel.textContent = gameState.fuel;
+  ui.probes.textContent = gameState.probes;
+  ui.data.textContent = gameState.data;
+  ui.fragments.textContent = gameState.fragments;
+  ui.missionText.textContent = missionCopy();
+}
+
+function showToast(message) {
+  clearTimeout(toastTimer);
+  ui.toast.textContent = message;
+  ui.toast.classList.add('visible');
+  toastTimer = setTimeout(() => ui.toast.classList.remove('visible'), 2800);
+}
+
+function currentStar() {
+  return galaxyStars.find((star) => star.name === gameState.currentLocation) || null;
+}
+
+function routeCost(star) {
+  const origin = currentStar();
+  const distance = origin ? origin.position.distanceTo(star.position) : star.position.length();
+  return origin?.name === star.name ? 0 : THREE.MathUtils.clamp(Math.ceil(distance * 0.34), 5, 28);
+}
+
+function updateRouteButton() {
+  if (!selectedStar) return;
+  const cost = routeCost(selectedStar);
+  ui.flyLabel.textContent = cost === 0 ? 'ВОЙТИ В СИСТЕМУ' : `ПРЫЖОК · ${cost} ТОПЛИВА`;
+  ui.fly.disabled = gameState.fuel < cost;
+}
 
 const STAR_TYPES = [
   {
@@ -327,14 +422,19 @@ function pickObject(event, moveOnly = false) {
 }
 
 function centerSystemObject(object) {
-  const destination = object.getWorldPosition(new THREE.Vector3());
+  const focusTarget = object.userData.focusTarget || object;
+  selectScanTarget(focusTarget);
+  const destination = focusTarget.getWorldPosition(new THREE.Vector3());
+  const targetShift = destination.clone().sub(controls.target);
   navigationTween = {
-    kind: 'target',
+    kind: 'pan',
     started: performance.now(),
     duration: 620,
     fromTarget: controls.target.clone(),
     toTarget: destination,
-    focusObject: object,
+    fromCamera: camera.position.clone(),
+    toCamera: camera.position.clone().add(targetShift),
+    focusObject: focusTarget,
   };
 }
 
@@ -352,21 +452,29 @@ function selectStar(sprite) {
   ui.planets.textContent = String(selectedStar.planetCount).padStart(2, '0');
   ui.swatch.style.background = `#${selectedStar.type.color.toString(16).padStart(6, '0')}`;
   ui.swatch.style.color = ui.swatch.style.background;
-  ui.fly.disabled = false;
+  updateRouteButton();
 
   const from = controls.target.clone();
   const to = selectedStar.position.clone();
+  const viewDirection = camera.position.clone().sub(from).normalize();
   navigationTween = {
-    kind: 'target',
+    kind: 'pan',
     started: performance.now(),
-    duration: 720,
+    duration: 820,
     fromTarget: from,
     toTarget: to,
+    fromCamera: camera.position.clone(),
+    toCamera: to.clone().add(viewDirection.multiplyScalar(STAR_FOCUS_DISTANCE)),
   };
 }
 
 function startFlight() {
   if (!selectedStar || transitionLocked || activeMode !== 'galaxy') {
+    return;
+  }
+  const cost = routeCost(selectedStar);
+  if (gameState.fuel < cost) {
+    showToast(`Недостаточно топлива: требуется ${cost}`);
     return;
   }
   const direction = camera.position.clone().sub(controls.target).normalize();
@@ -392,7 +500,7 @@ function updateNavigation(now) {
   const raw = Math.min(1, (now - navigationTween.started) / navigationTween.duration);
   const progress = easeInOutCubic(raw);
   controls.target.lerpVectors(navigationTween.fromTarget, navigationTween.toTarget, progress);
-  if (navigationTween.kind === 'flight') {
+  if (navigationTween.kind === 'flight' || navigationTween.kind === 'pan') {
     camera.position.lerpVectors(navigationTween.fromCamera, navigationTween.toCamera, progress);
   }
   if (raw >= 1) {
@@ -465,6 +573,7 @@ function updateProximity() {
 function clearSystem() {
   focusedSystemObject = null;
   orbitalBodies.length = 0;
+  spinningBodies.length = 0;
   systemClickables.length = 0;
   while (systemGroup.children.length) {
     const object = systemGroup.children.pop();
@@ -493,18 +602,280 @@ function createOrbitLine(radius, color = 0x38515c, opacity = 0.28) {
   }));
 }
 
+function colorVariant(color, saturationOffset, lightnessOffset) {
+  const value = new THREE.Color(color);
+  const hsl = {};
+  value.getHSL(hsl);
+  value.setHSL(
+    hsl.h,
+    THREE.MathUtils.clamp(hsl.s + saturationOffset, 0, 1),
+    THREE.MathUtils.clamp(hsl.l + lightnessOffset, 0, 1),
+  );
+  return `#${value.getHexString()}`;
+}
+
+function createPlanetTexture(color, random) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 384;
+  canvas.height = 192;
+  const context = canvas.getContext('2d');
+  const width = canvas.width;
+  const height = canvas.height;
+  const surfaceType = Math.floor(random() * 4);
+  const base = colorVariant(color, 0, -0.08);
+  const light = colorVariant(color, 0.08, 0.16);
+  const dark = colorVariant(color, 0.02, -0.2);
+
+  const baseGradient = context.createLinearGradient(0, 0, 0, height);
+  baseGradient.addColorStop(0, dark);
+  baseGradient.addColorStop(0.48, base);
+  baseGradient.addColorStop(1, colorVariant(color, -0.05, -0.16));
+  context.fillStyle = baseGradient;
+  context.fillRect(0, 0, width, height);
+
+  if (surfaceType === 0) {
+    // Каменная поверхность: плато и кратеры.
+    for (let index = 0; index < 34; index += 1) {
+      const x = random() * width;
+      const y = random() * height;
+      const radius = 2 + random() * 13;
+      context.beginPath();
+      context.arc(x, y, radius, 0, Math.PI * 2);
+      context.fillStyle = random() > 0.48 ? dark : light;
+      context.globalAlpha = 0.12 + random() * 0.22;
+      context.fill();
+      context.strokeStyle = light;
+      context.globalAlpha = 0.14;
+      context.lineWidth = Math.max(1, radius * 0.12);
+      context.stroke();
+    }
+  } else if (surfaceType === 1) {
+    // Океанический мир: материки и облачность.
+    context.globalAlpha = 0.58;
+    for (let index = 0; index < 24; index += 1) {
+      const x = random() * width;
+      const y = random() * height;
+      context.save();
+      context.translate(x, y);
+      context.rotate((random() - 0.5) * 1.1);
+      context.scale(1.5 + random() * 2.2, 0.55 + random());
+      context.beginPath();
+      context.arc(0, 0, 5 + random() * 12, 0, Math.PI * 2);
+      context.fillStyle = random() > 0.35 ? dark : light;
+      context.fill();
+      context.restore();
+    }
+    context.globalAlpha = 0.2;
+    context.strokeStyle = '#ffffff';
+    context.lineWidth = 2;
+    for (let index = 0; index < 13; index += 1) {
+      const y = random() * height;
+      context.beginPath();
+      context.moveTo(-30, y);
+      context.bezierCurveTo(width * 0.3, y - 12, width * 0.65, y + 13, width + 30, y - 3);
+      context.stroke();
+    }
+  } else if (surfaceType === 2) {
+    // Газовый гигант: полосы и атмосферный вихрь.
+    for (let band = 0; band < 22; band += 1) {
+      const y = (band / 22) * height;
+      const bandHeight = 4 + random() * 12;
+      context.fillStyle = band % 3 === 0 ? light : band % 2 === 0 ? dark : base;
+      context.globalAlpha = 0.18 + random() * 0.24;
+      context.beginPath();
+      context.moveTo(0, y);
+      for (let x = 0; x <= width; x += 16) {
+        context.lineTo(x, y + Math.sin(x * 0.045 + band) * (2 + random() * 2));
+      }
+      context.lineTo(width, y + bandHeight);
+      context.lineTo(0, y + bandHeight);
+      context.closePath();
+      context.fill();
+    }
+    context.globalAlpha = 0.32;
+    context.fillStyle = light;
+    context.beginPath();
+    context.ellipse(
+      width * (0.25 + random() * 0.5),
+      height * (0.35 + random() * 0.3),
+      24,
+      7,
+      -0.08,
+      0,
+      Math.PI * 2,
+    );
+    context.fill();
+  } else {
+    // Ледяной мир: светлые поля и разломы.
+    context.globalAlpha = 0.3;
+    context.fillStyle = '#d9f1f4';
+    context.fillRect(0, 0, width, height);
+    context.globalAlpha = 0.4;
+    context.strokeStyle = dark;
+    context.lineWidth = 1;
+    for (let index = 0; index < 28; index += 1) {
+      let x = random() * width;
+      let y = random() * height;
+      context.beginPath();
+      context.moveTo(x, y);
+      for (let segment = 0; segment < 5; segment += 1) {
+        x += (random() - 0.5) * 24;
+        y += 4 + random() * 12;
+        context.lineTo(x, y);
+      }
+      context.stroke();
+    }
+  }
+
+  context.globalAlpha = 0.09;
+  for (let index = 0; index < 1400; index += 1) {
+    const tone = random() > 0.5 ? 255 : 0;
+    context.fillStyle = `rgb(${tone} ${tone} ${tone})`;
+    const grainSize = random() > 0.94 ? 2 : 1;
+    context.fillRect(random() * width, random() * height, grainSize, grainSize);
+  }
+  context.globalAlpha = 1;
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  return { texture, surfaceType };
+}
+
 function createPlanetMaterial(color, random) {
+  const { texture, surfaceType } = createPlanetTexture(color, random);
   return new THREE.MeshStandardMaterial({
-    color,
-    roughness: 0.72 + random() * 0.2,
+    map: texture,
+    color: 0xffffff,
+    roughness: surfaceType === 2 ? 0.68 : 0.82 + random() * 0.12,
     metalness: random() * 0.12,
   });
+}
+
+const DISCOVERIES = [
+  'Минеральные жилы образуют геометрически точную сеть.',
+  'В атмосфере обнаружены следы сложной органики.',
+  'Под поверхностью работает неизвестный источник тепла.',
+  'Зонд зарегистрировал руины автоматической станции.',
+  'Магнитное поле хранит запись древней солнечной бури.',
+  'На ночной стороне замечены периодические световые импульсы.',
+  'Океан под ледяной корой остаётся геологически активным.',
+  'Поверхность богата редкими изотопами для реактора корабля.',
+];
+
+function createScanInfo(star, kind, index, name, artifact = false) {
+  const random = mulberry32(hashString(`${star.name}:${kind}:${index}`));
+  const discovery = artifact
+    ? 'В толще объекта найден фрагмент навигационного протокола. Его структура совпадает с неизвестным сигналом.'
+    : DISCOVERIES[Math.floor(random() * DISCOVERIES.length)];
+  return {
+    id: `${star.name}:${kind}:${index}`,
+    name,
+    kindLabel: kind === 'planet' ? 'ПЛАНЕТА' : 'СПУТНИК',
+    signal: artifact ? 'АНОМАЛИЯ · ВЫСОКИЙ ПРИОРИТЕТ' : random() > 0.56 ? 'СЛАБЫЙ СИГНАЛ' : 'ФОНОВОЕ ИЗЛУЧЕНИЕ',
+    discovery,
+    artifact,
+    dataReward: artifact ? 24 : 7 + Math.floor(random() * 12),
+    fuelReward: !artifact && random() > 0.76 ? 7 + Math.floor(random() * 9) : 0,
+    probeReward: !artifact && random() > 0.86 ? 1 : 0,
+  };
+}
+
+function scannedResult(info) {
+  const bonuses = [];
+  if (info.fuelReward) bonuses.push(`топливо +${info.fuelReward}`);
+  if (info.probeReward) bonuses.push(`зонд +${info.probeReward}`);
+  return `${info.discovery} Данные +${info.dataReward}${bonuses.length ? ` · ${bonuses.join(' · ')}` : ''}`;
+}
+
+function selectScanTarget(object) {
+  const info = object.userData.scanInfo;
+  activeScanTarget = info ? object : null;
+  if (!info) {
+    ui.scanPanel.classList.remove('visible');
+    return;
+  }
+  ui.scanPanel.classList.add('visible');
+  ui.scanName.textContent = info.name;
+  ui.scanKind.textContent = info.kindLabel;
+  ui.scanProgress.style.transition = 'none';
+  ui.scanProgress.style.width = '0%';
+  requestAnimationFrame(() => {
+    ui.scanProgress.style.transition = '';
+  });
+
+  if (gameState.scanned.includes(info.id)) {
+    ui.scanSignal.textContent = 'СКАНИРОВАНО';
+    ui.scanResult.textContent = scannedResult(info);
+    ui.scanButton.textContent = 'ДАННЫЕ ПОЛУЧЕНЫ';
+    ui.scanButton.disabled = true;
+  } else {
+    ui.scanSignal.textContent = info.signal;
+    ui.scanResult.textContent = info.artifact
+      ? 'Сигнатура совпадает с фрагментом неизвестного протокола.'
+      : 'Запустите зонд для анализа поверхности и атмосферы.';
+    ui.scanButton.textContent = gameState.probes > 0
+      ? 'ЗАПУСТИТЬ ЗОНД · 1'
+      : gameState.data >= 18 ? 'СОБРАТЬ ЗОНД · 18 ДАННЫХ' : 'НЕДОСТАТОЧНО РЕСУРСОВ';
+    ui.scanButton.disabled = (gameState.probes <= 0 && gameState.data < 18) || scanInProgress;
+  }
+}
+
+function finishMission() {
+  if (gameState.completed) return;
+  gameState.completed = true;
+  saveGameState();
+  ui.completeSystems.textContent = gameState.visitedSystems.length;
+  ui.completeData.textContent = gameState.data;
+  setTimeout(() => ui.complete.classList.add('visible'), 650);
+}
+
+function scanActiveTarget() {
+  const object = activeScanTarget;
+  const info = object?.userData.scanInfo;
+  if (!info || scanInProgress || gameState.scanned.includes(info.id)) return;
+  if (gameState.probes <= 0) {
+    if (gameState.data < 18) {
+      showToast('Недостаточно данных для сборки нового зонда');
+      return;
+    }
+    gameState.data -= 18;
+    gameState.probes += 1;
+    showToast('Бортовой фабрикатор собрал новый зонд');
+  }
+
+  scanInProgress = true;
+  gameState.probes -= 1;
+  updateGameUI();
+  saveGameState();
+  ui.scanButton.disabled = true;
+  ui.scanButton.textContent = 'СКАНИРОВАНИЕ…';
+  ui.scanResult.textContent = 'Зонд вышел на орбиту. Идёт спектральный анализ…';
+  ui.scanProgress.style.width = '100%';
+
+  setTimeout(() => {
+    gameState.scanned.push(info.id);
+    gameState.data += info.dataReward;
+    gameState.fuel = Math.min(120, gameState.fuel + info.fuelReward);
+    gameState.probes += info.probeReward;
+    if (info.artifact) gameState.fragments = Math.min(3, gameState.fragments + 1);
+    scanInProgress = false;
+    saveGameState();
+    updateGameUI();
+    if (activeMode === 'system' && activeScanTarget === object) {
+      selectScanTarget(object);
+    }
+    showToast(info.artifact ? `Фрагмент сигнала ${gameState.fragments}/3 восстановлен` : `Исследование завершено · данные +${info.dataReward}`);
+    if (gameState.fragments >= 3) finishMission();
+  }, 1550);
 }
 
 function buildSystem(star) {
   clearSystem();
   const random = mulberry32(hashString(star.name));
   const planetCount = star.planetCount;
+  const anomalyPlanetIndex = hashString(`${star.name}:anomaly`) % planetCount;
   let moonCount = 0;
 
   const ambient = new THREE.AmbientLight(0x7794aa, 0.18);
@@ -558,6 +929,7 @@ function buildSystem(star) {
     pivot.add(carrier);
 
     const planetName = `${star.name.split(' ')[0]} ${roman[index]}`;
+    const carriesArtifact = index === anomalyPlanetIndex;
     const planet = new THREE.Mesh(
       new THREE.SphereGeometry(size, 32, 32),
       createPlanetMaterial(planetPalette[Math.floor(random() * planetPalette.length)], random),
@@ -566,12 +938,17 @@ function buildSystem(star) {
     planet.userData = {
       kind: 'planet',
       name: planetName,
+      scanInfo: createScanInfo(star, 'planet', index, planetName, carriesArtifact),
     };
-    const planetLabel = makeLabel(planetName.toUpperCase(), 'system-label');
+    const planetLabel = makeLabel(`${planetName.toUpperCase()}${carriesArtifact ? '  ◇' : ''}`, 'system-label');
     planetLabel.position.set(size * 1.25, size * 0.85, 0);
     planet.add(planetLabel);
     carrier.add(planet);
     systemClickables.push(planet);
+    spinningBodies.push({
+      object: planet,
+      speed: 0.08 + random() * 0.22,
+    });
 
     if (size > 0.4 && random() > 0.52) {
       const ringGeometry = new THREE.RingGeometry(size * 1.45, size * 2.25, 64);
@@ -596,8 +973,9 @@ function buildSystem(star) {
       moonPivot.rotation.y = random() * Math.PI * 2;
       moonPivot.rotation.z = (random() - 0.5) * 0.25;
       const moonRadius = size * (2.8 + moonIndex * 1.35);
+      const moonSize = Math.max(0.055, size * (0.13 + random() * 0.14));
       const moon = new THREE.Mesh(
-        new THREE.SphereGeometry(Math.max(0.055, size * (0.13 + random() * 0.14)), 18, 18),
+        new THREE.SphereGeometry(moonSize, 18, 18),
         new THREE.MeshStandardMaterial({
           color: 0xaab0b3,
           roughness: 0.95,
@@ -608,13 +986,32 @@ function buildSystem(star) {
       moon.userData = {
         kind: 'moon',
         name: moonName,
+        scanInfo: createScanInfo(star, 'moon', `${index}-${moonIndex}`, moonName),
       };
       const moonLabel = makeLabel(moonName, 'system-label');
       moonLabel.position.set(size * 0.3, size * 0.22, 0);
       moon.add(moonLabel);
+      const moonHitTarget = new THREE.Mesh(
+        new THREE.SphereGeometry(Math.max(0.24, moonSize * 3.4), 12, 12),
+        new THREE.MeshBasicMaterial({
+          transparent: true,
+          opacity: 0,
+          depthWrite: false,
+          colorWrite: false,
+        }),
+      );
+      moonHitTarget.userData = {
+        kind: 'moon-hit-target',
+        focusTarget: moon,
+      };
+      moon.add(moonHitTarget);
       moonPivot.add(moon);
       carrier.add(moonPivot);
-      systemClickables.push(moon);
+      systemClickables.push(moonHitTarget);
+      spinningBodies.push({
+        object: moon,
+        speed: 0.18 + random() * 0.28,
+      });
       orbitalBodies.push({
         pivot: moonPivot,
         speed: 0.32 + random() * 0.62,
@@ -638,12 +1035,31 @@ function enterSystem() {
   if (!selectedStar || transitionLocked || activeMode !== 'galaxy') {
     return;
   }
+  const travelCost = routeCost(selectedStar);
+  if (gameState.fuel < travelCost) {
+    const direction = camera.position.clone().sub(selectedStar.position).normalize();
+    controls.target.copy(selectedStar.position);
+    camera.position.copy(selectedStar.position).add(direction.multiplyScalar(STAR_FOCUS_DISTANCE));
+    showToast(`Прыжок невозможен: требуется ${travelCost} топлива`);
+    return;
+  }
+  if (travelCost > 0) {
+    gameState.fuel -= travelCost;
+    gameState.currentLocation = selectedStar.name;
+  }
+  if (!gameState.visitedSystems.includes(selectedStar.name)) {
+    gameState.visitedSystems.push(selectedStar.name);
+  }
+  saveGameState();
+  updateGameUI();
   transitionLocked = true;
   ui.curtain.classList.add('visible');
   setTimeout(() => {
     buildSystem(selectedStar);
     activeMode = 'system';
     focusedSystemObject = null;
+    activeScanTarget = null;
+    ui.scanPanel.classList.remove('visible');
     galaxyGroup.visible = false;
     systemGroup.visible = true;
     app.classList.add('system-mode');
@@ -655,6 +1071,7 @@ function enterSystem() {
     controls.maxDistance = Math.max(28, 6 + selectedStar.planetCount * 4.6);
     scene.fog.density = 0.0025;
     ui.curtain.classList.remove('visible');
+    showToast(travelCost > 0 ? `Прыжок завершён · топливо −${travelCost}` : 'Возвращение в исследованную систему');
     setTimeout(() => {
       transitionLocked = false;
     }, 320);
@@ -670,6 +1087,8 @@ function leaveSystem() {
   setTimeout(() => {
     activeMode = 'galaxy';
     focusedSystemObject = null;
+    activeScanTarget = null;
+    ui.scanPanel.classList.remove('visible');
     systemGroup.visible = false;
     galaxyGroup.visible = true;
     app.classList.remove('system-mode');
@@ -677,15 +1096,26 @@ function leaveSystem() {
     ui.mode.textContent = 'КАРТА СЕКТОРА';
     const direction = new THREE.Vector3(0.75, 0.34, 1).normalize();
     controls.target.copy(selectedStar.position);
-    camera.position.copy(selectedStar.position).add(direction.multiplyScalar(17));
+    camera.position.copy(selectedStar.position).add(direction.multiplyScalar(STAR_FOCUS_DISTANCE));
     controls.minDistance = 4.5;
     controls.maxDistance = 105;
     scene.fog.density = 0.0055;
+    updateRouteButton();
     ui.curtain.classList.remove('visible');
     setTimeout(() => {
       transitionLocked = false;
     }, 320);
   }, 310);
+}
+
+function updateSystemZoomExit() {
+  if (activeMode !== 'system' || transitionLocked || navigationTween) {
+    return;
+  }
+  const distanceToFocus = camera.position.distanceTo(controls.target);
+  if (distanceToFocus >= controls.maxDistance * 0.94) {
+    leaveSystem();
+  }
 }
 
 function updateLabels() {
@@ -713,17 +1143,20 @@ function animate(now) {
   updateNavigation(now);
   updateKeyboardNavigation(delta);
   controls.update();
+  updateSystemZoomExit();
   updateProximity();
   updateLabels();
   updateCoordinates();
 
   if (activeMode === 'system') {
+    const orbitalDelta = delta * SYSTEM_TIME_SCALE;
     for (const body of orbitalBodies) {
-      body.pivot.rotation.y += body.speed * delta;
+      body.pivot.rotation.y += body.speed * orbitalDelta;
+    }
+    for (const body of spinningBodies) {
+      body.object.rotation.y += body.speed * orbitalDelta;
     }
     updateFocusedObject();
-  } else {
-    galaxyGroup.rotation.y += 0.000035;
   }
 
   renderer.render(scene, camera);
@@ -752,6 +1185,8 @@ renderer.domElement.addEventListener('pointermove', (event) => pickObject(event,
 renderer.domElement.addEventListener('dblclick', () => startFlight());
 ui.fly.addEventListener('click', startFlight);
 ui.back.addEventListener('click', leaveSystem);
+ui.scanButton.addEventListener('click', scanActiveTarget);
+ui.continueButton.addEventListener('click', () => ui.complete.classList.remove('visible'));
 $('.brand').addEventListener('click', (event) => {
   event.preventDefault();
   if (activeMode === 'system') {
@@ -803,4 +1238,5 @@ addEventListener('resize', () => {
 createBackgroundField();
 createSectorGrid();
 createGalaxy();
+updateGameUI();
 animate(performance.now());

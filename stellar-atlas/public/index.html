@@ -6,11 +6,11 @@
     <meta name="theme-color" content="#02040a" />
     <meta
       name="description"
-      content="Интерактивный процедурный атлас звёздных систем в трёхмерном пространстве."
+      content="Последний картограф — игра об исследовании процедурной галактики."
     />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />
-    <title>STELLAR / ATLAS</title>
+    <title>Последний картограф / STELLAR ATLAS</title>
   </head>
   <body>
     <main id="app" aria-label="Трёхмерная карта звёзд">
@@ -25,6 +25,12 @@
           </svg>
           <span>STELLAR <i>/</i> ATLAS</span>
         </a>
+        <div class="game-hud" aria-label="Ресурсы экспедиции">
+          <span><small>ТОПЛИВО</small><b id="fuel-value">100</b></span>
+          <span><small>ЗОНДЫ</small><b id="probe-value">6</b></span>
+          <span><small>ДАННЫЕ</small><b id="data-value">0</b></span>
+          <span class="fragment-stat"><small>СИГНАЛ</small><b><i id="fragment-value">0</i>/3</b></span>
+        </div>
         <div class="mode-indicator">
           <span class="pulse-dot"></span>
           <span id="mode-label">КАРТА СЕКТОРА</span>
@@ -32,12 +38,16 @@
       </header>
 
       <section class="hero-copy" id="hero-copy" aria-live="polite">
-        <p class="eyebrow">СЕКТОР 08–K</p>
-        <h1>Космос ближе,<br /><span>чем кажется.</span></h1>
+        <p class="eyebrow">ЭКСПЕДИЦИЯ 08–K</p>
+        <h1>Последний<br /><span>картограф.</span></h1>
         <p class="intro">
-          Вращайте мышью, двигайтесь через WASD / стрелки<br />
-          и кликайте по объектам, чтобы ставить их в центр.
+          Найдите три фрагмента неизвестного сигнала.<br />
+          Исследуйте системы и берегите топливо.
         </p>
+        <div class="mission-brief">
+          <span>ТЕКУЩАЯ ЗАДАЧА</span>
+          <b id="mission-text">Обнаружить первый фрагмент сигнала</b>
+        </div>
       </section>
 
       <aside class="selection-card" id="selection-card" aria-live="polite">
@@ -61,7 +71,7 @@
           <div class="progress-track"><i id="proximity-progress"></i></div>
         </div>
         <button id="fly-button" type="button" disabled>
-          <span>ПРОЛОЖИТЬ КУРС</span>
+          <span id="fly-label">ПРОЛОЖИТЬ КУРС</span>
           <kbd>↵</kbd>
         </button>
       </aside>
@@ -80,6 +90,18 @@
         </div>
       </section>
 
+      <aside class="scan-panel" id="scan-panel" aria-live="polite">
+        <p class="micro-label">ЦЕЛЬ СКАНИРОВАНИЯ</p>
+        <h3 id="scan-name">—</h3>
+        <div class="scan-meta">
+          <span id="scan-kind">НЕИЗВЕСТНЫЙ ОБЪЕКТ</span>
+          <b id="scan-signal">СИГНАЛ НЕ ОПРЕДЕЛЁН</b>
+        </div>
+        <p class="scan-result" id="scan-result">Выберите планету или спутник.</p>
+        <div class="scan-progress"><i id="scan-progress"></i></div>
+        <button id="scan-button" type="button">ЗАПУСТИТЬ ЗОНД</button>
+      </aside>
+
       <footer class="controls-bar">
         <div><span class="mouse-icon">◉</span><span>ЛКМ + движение</span><b>Вращать</b></div>
         <div><span class="mouse-icon">⌨</span><span>WASD / стрелки</span><b>Перемещать</b></div>
@@ -89,6 +111,20 @@
 
       <div class="coordinates" id="coordinates">X +00.0&nbsp;&nbsp; Y +00.0&nbsp;&nbsp; Z +00.0</div>
       <div class="transition-curtain" id="transition-curtain"><span>СИНХРОНИЗАЦИЯ ОРБИТ</span></div>
+      <div class="game-toast" id="game-toast" role="status"></div>
+
+      <section class="mission-complete" id="mission-complete" aria-labelledby="complete-title">
+        <div>
+          <p class="eyebrow">ПРОТОКОЛ ВОССТАНОВЛЕН</p>
+          <h2 id="complete-title">Источник найден.</h2>
+          <p>Три фрагмента сложились в единую карту. Сигнал ведёт за пределы сектора 08–K — туда, где экспедиция только начинается.</p>
+          <dl>
+            <div><dt>СИСТЕМ ИССЛЕДОВАНО</dt><dd id="complete-systems">0</dd></div>
+            <div><dt>ДАННЫХ СОБРАНО</dt><dd id="complete-data">0</dd></div>
+          </dl>
+          <button id="continue-button" type="button">ПРОДОЛЖИТЬ ИССЛЕДОВАНИЕ</button>
+        </div>
+      </section>
     </main>
 
     <script type="importmap">
